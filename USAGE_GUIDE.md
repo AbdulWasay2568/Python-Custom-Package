@@ -1,4 +1,4 @@
-# Using the Shared Library (`shared-lib`)
+# Using the Shared Library (`ezbot-shared`)
 
 This guide explains how to integrate this library into your own Python projects.
 
@@ -32,7 +32,7 @@ Once installed, you can import the library just like `requests` or `os`.
 The core logic resides in the `stdsubs` module:
 
 ```python
-from lib import stdsubs
+from ezbot_shared import stdsubs
 
 # Example: Execute a standard subsystem function
 stdsubs.test()
@@ -42,7 +42,7 @@ stdsubs.test()
 If you need specific Discord exceptions or helpers:
 
 ```python
-from lib.discord import stdExceptions
+from ezbot_shared.discord import stdExceptions
 
 try:
     # Your logic here
@@ -55,7 +55,7 @@ except stdExceptions.CommandError as e:
 The library includes a `files/` directory with static assets. You can easily retrieve their absolute paths using the helper in `stdsubs`:
 
 ```python
-from lib import stdsubs
+from ezbot_shared import stdsubs
 
 # Get the path to the entire 'files' folder
 files_dir = stdsubs.get_resource_path()

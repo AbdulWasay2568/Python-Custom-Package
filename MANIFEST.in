@@ -1,6 +1,7 @@
 include README.md
 include LICENSE
-recursive-include lib *.py
-recursive-include lib/files *
+recursive-include ezbot_shared *.py
+recursive-include ezbot_shared/files *
+recursive-include ezbot_shared/grammar *
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]

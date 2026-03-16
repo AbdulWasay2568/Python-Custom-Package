@@ -6,14 +6,16 @@ This guide provides step-by-step instructions on how to package your `ezBot Disc
 
 ## 1. Recommended Project Structure
 
-For a clean and professional package, it's recommended to follow the "src" layout or a standard flat layout. Currently, your code is in a `lib/` directory. To make it a proper package, ensure you have `__init__.py` files in every directory that should be treated as a package.
+For a clean and professional package, it's recommended to follow the "src" layout or a standard flat layout. Currently, your code is in an `ezbot_shared/` directory.
 
 Current structure:
 ```text
 Shared/
-├── lib/
+├── ezbot_shared/
 │   ├── __init__.py
 │   ├── discord/
+│   │   └── __init__.py
+│   ├── grammar/
 │   │   └── __init__.py
 │   └── ...
 ├── pyproject.toml
@@ -31,7 +33,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shared-lib"
+name = "ezbot-shared"
 version = "0.1.0"
 description = "Shared library for common functionality and utilities"
 readme = "README.md"
@@ -42,7 +44,8 @@ authors = [
 dependencies = [
     "fastapi>=0.115.12",
     "SQLAlchemy>=2.0.41",
-    "httpx>=0.28.1"
+    "httpx>=0.28.1",
+    "antlr4-python3-runtime>=4.13.2"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -55,10 +58,8 @@ Homepage = "https://github.com/yourusername/shared"
 Repository = "https://github.com/yourusername/shared"
 
 [tool.setuptools]
-# This tells setuptools where to find your packages
-# Since your packages are inside 'lib', we specify that.
 package-dir = {"" = "."}
-packages = ["lib", "lib.discord"]
+packages = ["ezbot_shared", "ezbot_shared.discord", "ezbot_shared.grammar"]
 ```
 
 > [!NOTE]
@@ -127,4 +128,4 @@ If you want to share your package with the world on [PyPI](https://pypi.org/):
 ### Summary of Changes Required:
 1. **Update `pyproject.toml`** with the dependencies and package directory settings shown above.
 2. **Update `setup.py`** to be a simple wrapper or remove it if not needed.
-3. **Verify `lib/__init__.py`** exists and exposes what you need.
+3. **Verify `ezbot_shared/__init__.py`** exists and exposes what you need.

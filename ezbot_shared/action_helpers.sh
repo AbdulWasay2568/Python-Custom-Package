@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # action_helpers.sh — reusable helpers for cross-repo scripts
-# Load with: source "<PROJECT_ROOT>/lib/action_helpers.sh"
+# Load with: source "<PROJECT_ROOT>/ezbot_shared/action_helpers.sh"
 # Expects the calling script to define SCRIPT_DIR and PROJECT_ROOT (recommended).
 
 set -euo pipefail
