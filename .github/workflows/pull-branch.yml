@@ -1,0 +1,175 @@
+name: Local Branch Update (with no local changes)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Branch to switch to and pull from"
+        required: false
+        type: string
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  update-branch:
+    runs-on:
+      - self-hosted
+      - user-${{ github.actor }}
+
+    concurrency:
+      group: local-branch-update-${{ github.repository }}
+      cancel-in-progress: false
+
+    env:
+      TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+      COMMIT_MESSAGE: "WIP: Auto-commit before branch switch"
+      REPO_BASE: "/home/runner/_repos"   # persistent clean clone location
+      WORKING_DIR: "/workspace"          # mounted working copy (left untouched if dirty)
+      GIT_AUTHOR_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_AUTHOR_EMAIL: "actions@github.com"
+      GIT_COMMITTER_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_COMMITTER_EMAIL: "actions@github.com"
+
+    steps:
+      - name: Prepare repo base dir (for clean clone)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPO_BASE}"
+
+      - name: Ensure repo path (prefer mounted WORKING_DIR if CLEAN; else clean clone)
+        id: ensure
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%/*}"
+          name="${GITHUB_REPOSITORY#*/}"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+
+          use_mounted=false
+          if [[ -n "${WORKING_DIR:-}" && -d "$WORKING_DIR/.git" ]]; then
+            # Consider it "clean" only if no pending changes at all
+            if [[ -z "$(git -C "$WORKING_DIR" status --porcelain || true)" ]]; then
+              use_mounted=true
+              echo "Using CLEAN mounted working copy: $WORKING_DIR"
+            else
+              echo "⚠️  Mounted repo has local changes; will use a CLEAN clone instead."
+            fi
+          else
+            echo "ℹ️  Mounted working dir missing or not a git repo; will use a CLEAN clone."
+          fi
+
+          if $use_mounted; then
+            path="$WORKING_DIR"
+            # Ensure origin is correct & set safe.directory to avoid dubious ownership on self-hosted
+            actual="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+            expected="$url"
+            if [[ -n "$actual" && "$actual" != "$expected" ]]; then
+              echo "::error::Mounted repo remote ($actual) is not the calling repo ($expected)."
+              exit 1
+            fi
+            git -C "$path" remote set-url origin "$expected" 2>/dev/null || git -C "$path" remote add origin "$expected"
+          else
+            base="${REPO_BASE}/${owner}"
+            mkdir -p "$base"
+            path="${base}/${name}"
+            echo "Using persistent CLEAN clone: $path"
+            if [[ ! -d "$path/.git" ]]; then
+              git clone "$url" "$path"
+            else
+              # Make sure it's clean & aligned to origin before switching branches
+              git -C "$path" remote set-url origin "$url"
+              git -C "$path" reset --hard
+              git -C "$path" clean -fdx
+            fi
+          fi
+
+          # Avoid "dubious ownership" on self-hosted
+          git config --global --add safe.directory "$path" || true
+
+          # Export for subsequent steps via environment (avoid GITHUB_OUTPUT pitfalls)
+          {
+            echo "ENSURE_PATH=$path"
+            echo "ENSURE_URL=$url"
+          } >> "$GITHUB_ENV"
+
+      - name: Build ephemeral AUTH header (no repo writes)
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN="${{ secrets.PUSH_PAT }}"
+          if [[ -z "$AUTH_TOKEN" ]]; then AUTH_TOKEN="${{ github.token }}"; fi
+          ENC="$(printf "x-access-token:%s" "$AUTH_TOKEN" | base64)"
+          # Export to env for later steps
+          echo "AUTH_EXTRA=AUTHORIZATION: basic $ENC" >> "$GITHUB_ENV"
+
+      - name: Fetch/prune using ephemeral header
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${ENSURE_PATH}"
+          git -c http.https://github.com/.extraheader="${AUTH_EXTRA}" fetch origin --prune
+
+      - name: Switch/create target branch (NO STASH NEEDED)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${ENSURE_PATH}"
+          tgt="${TARGET_BRANCH:-main}"
+          echo "Switching to target branch: $tgt"
+
+          # Make sure refs are fresh
+          git -c http.https://github.com/.extraheader="${AUTH_EXTRA}" fetch origin --prune
+
+          # If local branch exists, check it out; else try remote; else create empty local
+          if git show-ref --verify --quiet "refs/heads/$tgt"; then
+            git checkout "$tgt"
+          else
+            if git ls-remote --heads origin "$tgt" | grep -qE "refs/heads/$tgt$"; then
+              git checkout -b "$tgt" "origin/$tgt"
+            else
+              echo "::warning::Remote branch '$tgt' not found. Creating new local branch."
+              git checkout -b "$tgt"
+            fi
+          fi
+
+          # Ensure upstream is set; don't fail if it isn't available yet
+          git branch --set-upstream-to="origin/$tgt" "$tgt" || true
+
+      - name: Pull latest (ephemeral auth; fast-forward if possible)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${ENSURE_PATH}"
+          tgt="${TARGET_BRANCH:-main}"
+          echo "Pulling origin/$tgt"
+          if ! git -c http.https://github.com/.extraheader="${AUTH_EXTRA}" pull --ff-only origin "$tgt"; then
+            echo "⚠️  Fast-forward only pull failed; attempting normal pull with upstream."
+            git branch --set-upstream-to="origin/$tgt" "$tgt" || true
+            git -c http.https://github.com/.extraheader="${AUTH_EXTRA}" pull --no-rebase || true
+          fi
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${ENSURE_PATH}"
+          echo "✅ Final Status"
+          echo "Path: $(pwd)"
+          echo "Repo root: $(git rev-parse --show-toplevel || echo '(unknown)')"
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD || echo '(unknown)')"
+          echo "Remote: $(git remote get-url origin || echo '(none)')"
+          git log -1 --oneline || true
+          git status --short || true
+
+      - name: Safety scrub (ensure no leftover headers)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${ENSURE_PATH}"
+          # Remove any accidental writes to local config (we didn't set any, but safe)
+          git config --unset-all http.https://github.com/.extraheader || true

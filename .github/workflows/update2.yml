@@ -1,0 +1,183 @@
+name: Local Branch Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Branch to switch to and pull from"
+        required: false
+        type: string
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  update-branch:
+    runs-on:
+      - self-hosted
+      - user-${{ github.actor }}
+
+    concurrency:
+      group: local-branch-update-${{ github.repository }}
+      cancel-in-progress: false
+
+    env:
+      TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+      COMMIT_MESSAGE: "WIP: Auto-commit before branch switch"
+      REPO_BASE: "/home/runner/_repos"   # fallback clone location
+      WORKING_DIR: "/workspace"          # mounted working copy (avoid writing config here)
+      GIT_AUTHOR_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_AUTHOR_EMAIL: "actions@github.com"
+      GIT_COMMITTER_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_COMMITTER_EMAIL: "actions@github.com"
+
+    steps:
+      - name: Prepare repo base dir (for fallback)
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPO_BASE}"
+
+      - name: Ensure repo path (prefer mounted WORKING_DIR)
+        id: ensure
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%/*}"
+          name="${GITHUB_REPOSITORY#*/}"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+
+          if [[ -n "$WORKING_DIR" && -d "$WORKING_DIR/.git" ]]; then
+            path="$WORKING_DIR"
+            echo "Using mounted working copy: $path"
+            actual="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+            expected="$url"
+            if [[ -n "$actual" && "$actual" != "$expected" ]]; then
+              echo "::error::Mounted repo remote ($actual) is not the calling repo ($expected)."
+              exit 1
+            fi
+            # Ensure origin exists and is correct (without credentials)
+            if ! git -C "$path" remote | grep -qx origin; then
+              git -C "$path" remote add origin "$expected"
+            else
+              git -C "$path" remote set-url origin "$expected"
+            fi
+          else
+            base="${REPO_BASE}/${owner}"
+            mkdir -p "$base"
+            path="${base}/${name}"
+            echo "Using persistent clone: $path"
+            if [[ ! -d "$path/.git" ]]; then
+              git clone "$url" "$path"
+            else
+              git -C "$path" remote set-url origin "$url"
+            fi
+          fi
+
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "url=$url"   >> "$GITHUB_OUTPUT"
+
+      - name: Build ephemeral AUTH header (no repo writes)
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN="${{ secrets.PUSH_PAT }}"
+          if [[ -z "$AUTH_TOKEN" ]]; then AUTH_TOKEN="${{ github.token }}"; fi
+          # base64("x-access-token:<token>")
+          ENC="$(printf "x-access-token:%s" "$AUTH_TOKEN" | base64)"
+          echo "extra=AUTHORIZATION: basic $ENC" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch/prune using ephemeral header
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" fetch origin --prune
+
+      - name: Detect status
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          git status --porcelain
+          current_branch="$(git rev-parse --abbrev-ref HEAD || echo 'HEAD')"
+          echo "current_branch=$current_branch" >> "$GITHUB_OUTPUT"
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit & push uncommitted changes (if any, ephemeral auth)
+        if: steps.status.outputs.has_changes == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          current_branch="${{ steps.status.outputs.current_branch }}"
+          if [[ "$current_branch" == "HEAD" || -z "$current_branch" ]]; then
+            current_branch="$(git branch --show-current || true)"
+            if [[ -z "$current_branch" ]]; then
+              echo "::error::Detached HEAD; cannot push local changes."
+              exit 1
+            fi
+          fi
+          git add -A
+          git commit -m "${COMMIT_MESSAGE}" || echo "Nothing to commit"
+          git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" \
+            push --set-upstream origin "$current_branch" || \
+          git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" \
+            push origin "$current_branch"
+
+      - name: Switch to target branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          echo "Switching to $TARGET_BRANCH"
+          git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" fetch origin --prune
+          if git show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
+            git checkout "$TARGET_BRANCH"
+          else
+            if git ls-remote --heads origin "$TARGET_BRANCH" | grep -qE "refs/heads/$TARGET_BRANCH$"; then
+              git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            else
+              echo "::warning::Remote branch '$TARGET_BRANCH' not found. Creating new local branch."
+              git checkout -b "$TARGET_BRANCH"
+            fi
+          fi
+
+      - name: Pull latest (ephemeral auth)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          echo "Pulling origin/$TARGET_BRANCH"
+          if ! git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" pull origin "$TARGET_BRANCH"; then
+            git branch --set-upstream-to="origin/$TARGET_BRANCH" "$TARGET_BRANCH" || true
+            git -c http.https://github.com/.extraheader="${{ steps.auth.outputs.extra }}" pull || true
+          fi
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          echo "✅ Final Status"
+          echo "Path: $(pwd)"
+          echo "Repo root: $(git rev-parse --show-toplevel)"
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "Remote: $(git remote get-url origin)"
+          git log -1 --oneline || true
+          git status --short || true
+
+      - name: Safety scrub (ensure no leftover headers in mounted repo)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          # Remove any accidental writes to local config (shouldn't exist, but safe to do)
+          git config --unset-all http.https://github.com/.extraheader || true

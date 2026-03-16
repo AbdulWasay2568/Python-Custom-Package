@@ -1,0 +1,233 @@
+# Environment files
+.venv
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.git-credentials
+
+# Temporary workflow folders (from local-update.yml and other workflows)
+_update/
+_update.sh
+_temp/
+_pipeline/
+_build/
+_deploy/
+_cache/
+_work/
+_staging/
+_PipelineMapping/
+_tool/
+ezBot/
+ezESP/
+
+# Shared folder duplicates (avoid nested shared/shared structure)
+shared/
+Shared/
+
+# GitHub workflow artifacts and temporary files
+
+!bin/entrypoint.sh  # Keep the essential entrypoint script
+!bin/setup-github-runner.sh  # Keep the GitHub runner setup script
+# Common temporary directories
+temp/
+tmp/
+temporary/
+staging/
+build/
+dist/
+output/
+target/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+*.sublime-*
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.coverage
+.tox/
+.nox/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+.node_repl_history
+*.tgz
+.yarn-integrity
+.cache/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+log/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Archive files
+*.zip
+*.rar
+*.7z
+
+# Security and credentials
+.secrets/
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+config.json
+auth.json
+
+# GitHub Actions artifacts
+actions-runner/
+_actions/
+.runner/
+.credentials
+.credentials_rsaparams
+
+# Self-hosted runner specific
+runner-work/
+_diag/
+_repos
+.setup/
+
+
+# Mac specific
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# Linux specific
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# JetBrains IDEs
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Visual Studio Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Sublime Text
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Project specific temporary files
+*.tmp
+*.temp
+working/
+scratch/
+test-output/
+debug/
+local/

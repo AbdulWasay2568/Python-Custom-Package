@@ -1,0 +1,143 @@
+name: Update Branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch to push changes from'
+        required: true
+        type: string
+      target_branch:
+        description: 'Target branch to switch to and pull'
+        required: false
+        default: 'main'
+        type: string
+      commit_message:
+        description: 'Custom commit message (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  update-branches:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for all branches
+        token: ${{ secrets.GITHUB_TOKEN }}
+        persist-credentials: true
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+    
+    - name: Validate inputs
+      run: |
+        echo "🚀 Starting update branches workflow..."
+        echo "📍 Source branch: ${{ github.event.inputs.source_branch }}"
+        echo "🎯 Target branch: ${{ github.event.inputs.target_branch }}"
+        
+        # Check if source branch exists
+        if ! git show-ref --verify --quiet "refs/heads/${{ github.event.inputs.source_branch }}" && ! git show-ref --verify --quiet "refs/remotes/origin/${{ github.event.inputs.source_branch }}"; then
+          echo "❌ Error: Source branch '${{ github.event.inputs.source_branch }}' does not exist"
+          exit 1
+        fi
+        
+        # Check if target branch exists
+        if ! git show-ref --verify --quiet "refs/heads/${{ github.event.inputs.target_branch }}" && ! git show-ref --verify --quiet "refs/remotes/origin/${{ github.event.inputs.target_branch }}"; then
+          echo "❌ Error: Target branch '${{ github.event.inputs.target_branch }}' does not exist"
+          exit 1
+        fi
+        
+        # Check if source and target are the same
+        if [ "${{ github.event.inputs.source_branch }}" = "${{ github.event.inputs.target_branch }}" ]; then
+          echo "❌ Error: Source and target branches cannot be the same"
+          exit 1
+        fi
+    
+    - name: Switch to source branch
+      run: |
+        echo "🔄 Switching to source branch: ${{ github.event.inputs.source_branch }}"
+        
+        # Check if branch exists locally
+        if git show-ref --verify --quiet "refs/heads/${{ github.event.inputs.source_branch }}"; then
+          git checkout "${{ github.event.inputs.source_branch }}"
+        else
+          # Create local branch from remote
+          git checkout -b "${{ github.event.inputs.source_branch }}" "origin/${{ github.event.inputs.source_branch }}"
+        fi
+        
+        echo "✅ Successfully switched to ${{ github.event.inputs.source_branch }}"
+    
+    - name: Check for changes and commit
+      id: commit_changes
+      run: |
+        echo "📤 Checking for changes on ${{ github.event.inputs.source_branch }}..."
+        
+        # Check if there are any changes to commit
+        if git diff --quiet && git diff --cached --quiet; then
+          echo "⚠️ No changes to commit on ${{ github.event.inputs.source_branch }}"
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+        else
+          # Add all changes
+          git add .
+          
+          # Check if there are staged changes after adding
+          if git diff --cached --quiet; then
+            echo "⚠️ No staged changes to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            # Use custom commit message or generate one
+            if [ -n "${{ github.event.inputs.commit_message }}" ]; then
+              COMMIT_MSG="${{ github.event.inputs.commit_message }}"
+            else
+              COMMIT_MSG="Auto-update from ${{ github.event.inputs.source_branch }} via GitHub Actions at $(date '+%Y-%m-%d %H:%M:%S')"
+            fi
+            
+            git commit -m "${COMMIT_MSG}"
+            echo "✅ Committed changes: ${COMMIT_MSG}"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+        fi
+    
+    - name: Push source branch
+      run: |
+        echo "🔄 Pushing ${{ github.event.inputs.source_branch }} to remote..."
+        git push origin "${{ github.event.inputs.source_branch }}"
+        echo "✅ Successfully pushed ${{ github.event.inputs.source_branch }}"
+    
+    - name: Switch to target branch
+      run: |
+        echo "🔄 Switching to target branch: ${{ github.event.inputs.target_branch }}"
+        
+        # Check if target branch exists locally
+        if git show-ref --verify --quiet "refs/heads/${{ github.event.inputs.target_branch }}"; then
+          git checkout "${{ github.event.inputs.target_branch }}"
+          echo "✅ Switched to local branch ${{ github.event.inputs.target_branch }}"
+        else
+          # Create local branch from remote
+          git checkout -b "${{ github.event.inputs.target_branch }}" "origin/${{ github.event.inputs.target_branch }}"
+          echo "✅ Created and switched to ${{ github.event.inputs.target_branch }} from origin/${{ github.event.inputs.target_branch }}"
+        fi
+    
+    - name: Pull latest changes
+      run: |
+        echo "📥 Pulling latest changes from ${{ github.event.inputs.target_branch }}..."
+        git pull origin "${{ github.event.inputs.target_branch }}"
+        echo "✅ Successfully pulled latest changes from origin/${{ github.event.inputs.target_branch }}"
+    
+    - name: Summary
+      run: |
+        echo "🎉 Update complete!"
+        echo "Summary:"
+        echo "  • Source branch: ${{ github.event.inputs.source_branch }}"
+        echo "  • Target branch: ${{ github.event.inputs.target_branch }}"
+        echo "  • Had changes to commit: ${{ steps.commit_changes.outputs.has_changes }}"
+        echo "  • Current branch: $(git rev-parse --abbrev-ref HEAD)"

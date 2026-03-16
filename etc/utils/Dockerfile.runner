@@ -1,0 +1,52 @@
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Base deps
+RUN apt-get update && apt-get install -y \
+    curl wget git jq tar sudo ca-certificates \
+    gnupg lsb-release dos2unix xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Runner user
+RUN useradd -m -s /bin/bash runner && \
+    usermod -aG sudo runner && \
+    echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+WORKDIR /home/runner
+ENV RUNNER_VERSION=2.313.0
+ARG TARGETARCH
+
+# Download correct runner build for the platform Docker is building
+RUN set -eux; \
+    if [ "${TARGETARCH:-}" = "amd64" ]; then RA=x64; \
+    elif [ "${TARGETARCH:-}" = "arm64" ]; then RA=arm64; \
+    else echo "Unsupported arch: ${TARGETARCH}"; exit 1; fi; \
+    curl -fsSL -o actions-runner-linux.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RA}-${RUNNER_VERSION}.tar.gz"; \
+    tar xzf actions-runner-linux.tar.gz; rm actions-runner-linux.tar.gz; \
+    ./bin/installdependencies.sh
+
+RUN mkdir -p /workspace && chown -R runner:runner /home/runner /workspace
+
+USER runner
+COPY entrypoint.sh /home/runner/entrypoint.sh
+USER root
+RUN dos2unix /home/runner/entrypoint.sh && chmod +x /home/runner/entrypoint.sh && chown runner:runner /home/runner/entrypoint.sh
+USER runner
+
+# Default environment variables (can be overridden via docker-compose or runtime)
+ENV RUNNER_NAME="docker-runner"
+# Use a neutral runner work dir (not /workspace)
+ENV RUNNER_WORKDIR="/home/runner/_work"
+
+# (optional) still keep /workspace as a mounted volume if you need it for other things
+VOLUME ["/repos"]   # mount this from the host to persist clones across container restarts
+
+ENV RUNNER_LABELS="self-hosted,docker"
+ENV REGISTRATION_MODE="repo"
+ENV GITHUB_OWNER=""
+ENV GITHUB_REPO=""
+ENV COMPANY_TOKEN=""
+
+VOLUME ["/workspace"]
+ENTRYPOINT ["/home/runner/entrypoint.sh"]

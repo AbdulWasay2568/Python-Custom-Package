@@ -1,0 +1,463 @@
+name: Daily Diff Report
+
+on:
+  schedule:
+    # Run every day at 9:00 AM UTC (adjust timezone as needed)
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch to analyze for changes (optional when manual)'
+        required: false
+        type: string
+        default: ''
+      recipient_email:
+        description: 'Email address to send report to (optional if repo variables/secrets configured)'
+        required: false
+        type: string
+        default: ''
+      days_back:
+        description: 'Number of days back to analyze changes (1-30)'
+        required: false
+        type: number
+        default: 1
+      include_file_contents:
+        description: 'Include actual file diff contents'
+        required: false
+        type: boolean
+        default: true
+
+# Repository maintainers: configure one of these for unattended (cron) runs
+#   Repository Variable: DIFF_REPORT_RECIPIENT (preferred)
+#   or Secret: DIFF_REPORT_RECIPIENT
+# Optional per-user overrides (match actor uppercased, non-alnum -> _):
+#   DIFF_BRANCH_<ACTOR>
+#   DIFF_RECIPIENT_<ACTOR>
+# Example: actor "john-doe" -> DIFF_BRANCH_JOHN_DOE / DIFF_RECIPIENT_JOHN_DOE
+env:
+  DEFAULT_BRANCH: main
+  # Simple defaults (days / include contents) — inputs override if provided for manual dispatch
+  DAYS_BACK: ${{ github.event.inputs.days_back || 1 }}
+  INCLUDE_FILE_CONTENTS: ${{ github.event.inputs.include_file_contents || true }}
+
+jobs:
+  generate-diff-report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ✅ Verified action (GitHub)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Identify actor (normalized)
+        id: who
+        run: |
+          actor_upper=$(echo "${GITHUB_ACTOR}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
+          echo "actor_upper=$actor_upper" >> "$GITHUB_OUTPUT"
+          echo "Actor (raw): $GITHUB_ACTOR"
+          echo "Actor (upper): $actor_upper"
+
+      - name: (Optional) Load per-user mappings (JSON via repo variable/secret)
+        id: maps
+        env:
+          BRANCH_MAP_JSON: ${{ vars.DIFF_BRANCH_MAP || secrets.DIFF_BRANCH_MAP }}
+          RECIPIENT_MAP_JSON: ${{ vars.DIFF_RECIPIENT_MAP || secrets.DIFF_RECIPIENT_MAP }}
+        run: |
+          # Store raw (may be empty) for later steps
+          echo "branch_map_json=${BRANCH_MAP_JSON}" >> "$GITHUB_OUTPUT"
+          echo "recipient_map_json=${RECIPIENT_MAP_JSON}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${BRANCH_MAP_JSON}" ]]; then echo "Found branch map JSON"; else echo "No branch map JSON provided"; fi
+          if [[ -n "${RECIPIENT_MAP_JSON}" ]]; then echo "Found recipient map JSON"; else echo "No recipient map JSON provided"; fi
+
+      - name: Determine target branch (input > per-user var > current branch > default)
+        id: determine_branch
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.target_branch || '' }}
+          DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+          BRANCH_MAP_JSON: ${{ steps.maps.outputs.branch_map_json }}
+          ACTOR_UPPER: ${{ steps.who.outputs.actor_upper }}
+        run: |
+          set -euo pipefail
+          # Try map lookup if present and no explicit input
+          map_branch=""
+          if [[ -n "${BRANCH_MAP_JSON}" && -z "$INPUT_BRANCH" ]]; then
+            if command -v jq >/dev/null 2>&1; then
+              map_branch=$(echo "$BRANCH_MAP_JSON" | jq -r --arg A "$ACTOR_UPPER" '.[ $A ] // .[ ($A | ascii_downcase) ] // .[ ($A | ascii_downcase | gsub("_";"-")) ] // empty') || true
+              if [[ "$map_branch" == "null" ]]; then map_branch=""; fi
+            else
+              echo "::warning::jq not installed; cannot parse BRANCH_MAP_JSON" >&2
+            fi
+          fi
+
+          if [[ -n "$INPUT_BRANCH" ]]; then target="$INPUT_BRANCH"; source=INPUT; 
+          elif [[ -n "$map_branch" ]]; then target="$map_branch"; source=MAP_JSON; 
+          else
+            current="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+            if [[ "$current" != "HEAD" && -n "$current" ]]; then target="$current"; source=CURRENT_BRANCH; 
+            else target="$DEFAULT_BRANCH"; source=DEFAULT; fi; fi
+          echo "Using branch: $target (source=$source)"
+          echo "target_branch=$target" >> "$GITHUB_OUTPUT"
+          echo "TARGET_BRANCH=$target" >> "$GITHUB_ENV"
+
+      - name: Determine recipient email (input > per-user var > repo var/secret)
+        id: determine_recipient
+        env:
+          INPUT_RECIPIENT: ${{ github.event.inputs.recipient_email || '' }}
+          DEFAULT_RECIPIENT: ${{ vars.DIFF_REPORT_RECIPIENT || secrets.DIFF_REPORT_RECIPIENT }}
+          RECIPIENT_MAP_JSON: ${{ steps.maps.outputs.recipient_map_json }}
+          ACTOR_UPPER: ${{ steps.who.outputs.actor_upper }}
+        run: |
+          set -euo pipefail
+          map_recipient=""
+          if [[ -n "${RECIPIENT_MAP_JSON}" && -z "$INPUT_RECIPIENT" ]]; then
+            if command -v jq >/dev/null 2>&1; then
+              map_recipient=$(echo "$RECIPIENT_MAP_JSON" | jq -r --arg A "$ACTOR_UPPER" '.[ $A ] // .[ ($A | ascii_downcase) ] // .[ ($A | ascii_downcase | gsub("_";"-")) ] // empty') || true
+              if [[ "$map_recipient" == "null" ]]; then map_recipient=""; fi
+            else
+              echo "::warning::jq not installed; cannot parse RECIPIENT_MAP_JSON" >&2
+            fi
+          fi
+          if [[ -n "$INPUT_RECIPIENT" ]]; then recipient="$INPUT_RECIPIENT"; source=INPUT;
+          elif [[ -n "$map_recipient" ]]; then recipient="$map_recipient"; source=MAP_JSON;
+          elif [[ -n "$DEFAULT_RECIPIENT" ]]; then recipient="$DEFAULT_RECIPIENT"; source=DEFAULT;
+          else echo "::error::No recipient email could be resolved. Provide an input, set DIFF_REPORT_RECIPIENT, or supply RECIPIENT map." >&2; exit 1; fi
+          echo "Resolved recipient: $recipient (source=$source)"
+          echo "recipient_email=$recipient" >> "$GITHUB_OUTPUT"
+          echo "RECIPIENT_EMAIL=$recipient" >> "$GITHUB_ENV"
+
+      - name: Export remaining dynamic env
+        run: |
+          # DAYS_BACK already set from workflow or input
+          echo "DAYS_BACK=$DAYS_BACK" >> "$GITHUB_ENV"
+          echo "INCLUDE_FILE_CONTENTS=$INCLUDE_FILE_CONTENTS" >> "$GITHUB_ENV"
+
+      - name: Normalize days_back range
+        run: |
+          if ! [[ "$DAYS_BACK" =~ ^[0-9]+$ ]]; then
+            echo "::warning::DAYS_BACK '$DAYS_BACK' is not a number. Defaulting to 1." >&2
+            DAYS_BACK=1
+          fi
+          if [ "$DAYS_BACK" -lt 1 ]; then DAYS_BACK=1; fi
+          if [ "$DAYS_BACK" -gt 30 ]; then
+            echo "::warning::DAYS_BACK '$DAYS_BACK' exceeds 30. Capping to 30." >&2
+            DAYS_BACK=30
+          fi
+          echo "Final DAYS_BACK=$DAYS_BACK" >> "$GITHUB_ENV"
+
+      - name: Set up Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+      - name: Fetch all branches and display available options
+        run: |
+          echo "Fetching all remote branches..."
+          git fetch --all
+          echo ""
+          echo "Available branches in this repository:"
+          echo "======================================"
+          git branch -r --format='%(refname:short)' | sed 's|origin/||' | grep -v '^HEAD' | sort | nl -v0 -s'. '
+          echo ""
+          echo "Current target branch: $TARGET_BRANCH"
+
+      - name: Validation & context summary
+        run: |
+          echo "✅ Recipient email: ${RECIPIENT_EMAIL}"
+          echo "✅ Target branch: ${TARGET_BRANCH}"
+          echo "✅ Days back: ${DAYS_BACK}"
+          echo "✅ Include file contents: ${INCLUDE_FILE_CONTENTS}"
+          if ! git rev-parse --verify "${TARGET_BRANCH}" >/dev/null 2>&1; then
+            echo "::error::Target branch '${TARGET_BRANCH}' not found in repository." >&2
+            git branch -a >&2 || true
+            exit 1
+          fi
+
+      - name: Calculate date range and get commits
+        id: commits
+        run: |
+          end_date=$(date -u +"%Y-%m-%d %H:%M:%S")
+          start_date=$(date -u -d "$DAYS_BACK days ago" +"%Y-%m-%d %H:%M:%S")
+
+          echo "start_date=$start_date" >> $GITHUB_OUTPUT
+          echo "end_date=$end_date" >> $GITHUB_OUTPUT
+
+          echo "Analyzing changes from $start_date to $end_date on branch $TARGET_BRANCH"
+          git checkout "$TARGET_BRANCH" || exit 1
+
+          start_commit=$(git log --until="$start_date" --format="%H" -1 2>/dev/null || echo "")
+          current_commit=$(git log --format="%H" -1)
+
+          echo "start_commit=$start_commit" >> $GITHUB_OUTPUT
+          echo "current_commit=$current_commit" >> $GITHUB_OUTPUT
+
+          if [ -n "$start_commit" ] && [ "$start_commit" != "$current_commit" ]; then
+            commits_count=$(git rev-list --count "$start_commit..$current_commit" 2>/dev/null || echo "0")
+          else
+            commits_count=$(git rev-list --count --since="$start_date" "$current_commit" 2>/dev/null || echo "0")
+          fi
+
+          echo "commits_count=$commits_count" >> $GITHUB_OUTPUT
+          echo "Found $commits_count commits in the specified time range"
+
+      - name: Generate diff report
+        id: diff
+        run: |
+          start_date="${{ steps.commits.outputs.start_date }}"
+          end_date="${{ steps.commits.outputs.end_date }}"
+          start_commit="${{ steps.commits.outputs.start_commit }}"
+          current_commit="${{ steps.commits.outputs.current_commit }}"
+          commits_count="${{ steps.commits.outputs.commits_count }}"
+
+          mkdir -p reports
+          report_file="reports/daily-diff-report-$(date +%Y-%m-%d).md"
+
+          {
+            echo "# Daily Diff Report 📊"
+            echo ""
+            echo "**Generated:** $(date -u)"
+            echo "**Branch:** \`$TARGET_BRANCH\`"
+            echo "**Period:** $start_date to $end_date"
+            echo "**Commits Found:** $commits_count"
+            echo "**Recipient:** $RECIPIENT_EMAIL"
+            echo ""
+          } > "$report_file"
+
+          if [ "$commits_count" -gt 0 ]; then
+            {
+              echo "## Recent Commits"
+              echo ""
+            } >> "$report_file"
+
+            if [ -n "$start_commit" ] && [ "$start_commit" != "$current_commit" ]; then
+              git log "$start_commit..$current_commit" --pretty=format:"- [\`%h\`] %s - *%an* (%ad)" --date=short >> "$report_file"
+            else
+              git log --since="$start_date" --pretty=format:"- [\`%h\`] %s - *%an* (%ad)" --date=short >> "$report_file"
+            fi
+
+            {
+              echo ""
+              echo ""
+              echo "## File Changes"
+              echo ""
+            } >> "$report_file"
+
+            if [ -n "$start_commit" ] && [ "$start_commit" != "$current_commit" ]; then
+              changed_files=$(git diff --name-only "$start_commit..$current_commit" 2>/dev/null || echo "")
+              diff_stats=$(git diff --stat "$start_commit..$current_commit" 2>/dev/null || echo "No differences found")
+            else
+              days_commits=$(git rev-list --count --since="$start_date" HEAD 2>/dev/null || echo "1")
+              if [ "$days_commits" -gt 0 ]; then
+                compare_commit="HEAD~$days_commits"
+                changed_files=$(git diff --name-only "$compare_commit..HEAD" 2>/dev/null || echo "")
+                diff_stats=$(git diff --stat "$compare_commit..HEAD" 2>/dev/null || echo "No differences found")
+              else
+                changed_files=""
+                diff_stats="No differences found"
+              fi
+            fi
+
+            if [ "$diff_stats" != "No differences found" ] && [ -n "$changed_files" ]; then
+              {
+                echo "### Diff Statistics"
+                echo ""
+                echo '```'
+                echo "$diff_stats"
+                echo '```'
+                echo ""
+                echo "### Changed Files"
+                echo ""
+              } >> "$report_file"
+
+              echo "$changed_files" | while read -r file; do
+                if [ -n "$file" ]; then
+                  if [ -n "$start_commit" ] && [ "$start_commit" != "$current_commit" ]; then
+                    status=$(git diff --name-status "$start_commit..$current_commit" -- "$file" | cut -f1)
+                  else
+                    status=$(git diff --name-status "$compare_commit..HEAD" -- "$file" | cut -f1)
+                  fi
+                  case $status in
+                    A) status_icon="🆕" ;;
+                    M) status_icon="📝" ;;
+                    D) status_icon="🗑️" ;;
+                    *) status_icon="📄" ;;
+                  esac
+                  echo "- $status_icon \`$file\`" >> "$report_file"
+                fi
+              done
+
+              if [ "${INCLUDE_FILE_CONTENTS}" = "true" ] && [ -n "$changed_files" ]; then
+                {
+                  echo ""
+                  echo "### Detailed File Diffs"
+                  echo ""
+                } >> "$report_file"
+
+                echo "$changed_files" | head -10 | while read -r file; do
+                  if [ -n "$file" ]; then
+                    {
+                      echo "#### \`$file\`"
+                      echo ""
+                      echo '```diff'
+                    } >> "$report_file"
+                    if [ -n "$start_commit" ] && [ "$start_commit" != "$current_commit" ]; then
+                      git diff "$start_commit..$current_commit" -- "$file" 2>/dev/null | head -100 >> "$report_file"
+                    else
+                      git diff "$compare_commit..HEAD" -- "$file" 2>/dev/null | head -100 >> "$report_file"
+                    fi
+                    {
+                      echo '```'
+                      echo ""
+                    } >> "$report_file"
+                  fi
+                done
+
+                total_files=$(echo "$changed_files" | wc -l)
+                if [ "$total_files" -gt 10 ]; then
+                  echo "*Note: Showing first 10 files only. Total changed files: $total_files*" >> "$report_file"
+                  echo "" >> "$report_file"
+                fi
+              fi
+            else
+              echo "No file changes found in the specified time period." >> "$report_file"
+              echo "" >> "$report_file"
+            fi
+          else
+            {
+              echo "## No Commits Found"
+              echo ""
+              echo "No commits were found in the specified time period ($DAYS_BACK days back)."
+              echo ""
+            } >> "$report_file"
+          fi
+
+          {
+            echo "## Summary"
+            echo ""
+            echo "This report was automatically generated by GitHub Actions."
+            echo "For more details, check the [Actions tab](https://github.com/${{ github.repository }}/actions)."
+            echo ""
+            echo "---"
+            echo "*Generated at $(date -u) UTC*"
+          } >> "$report_file"
+
+          echo "report_file=$report_file" >> $GITHUB_OUTPUT
+
+      # ✅ Verified action (GitHub)
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-diff-report-$(date +%Y-%m-%d)
+          path: reports/
+          retention-days: 30
+
+      # ✅ Verified actions (GitHub/AWS) — use Python + SES instead of third-party mail action
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Send diff report via SES
+        env:
+          RECIPIENT_EMAIL: ${{ env.RECIPIENT_EMAIL }}
+          REPO_NAME: ${{ github.repository }}
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          DAYS_BACK: ${{ env.DAYS_BACK }}
+          REPORT_PATH: ${{ steps.diff.outputs.report_file }}
+          SES_FROM_ADDRESS: ${{ secrets.SES_FROM_ADDRESS }}
+        run: |
+          python - <<'PY'
+          import mimetypes
+          import os
+          import pathlib
+          import textwrap
+
+          import boto3
+          from email.message import EmailMessage
+          from email.utils import formatdate
+
+          recipient = os.environ["RECIPIENT_EMAIL"]
+          sender = os.environ["SES_FROM_ADDRESS"]
+          repo = os.environ["REPO_NAME"]
+          branch = os.environ["TARGET_BRANCH"]
+          days_back = os.environ["DAYS_BACK"]
+          report_path = pathlib.Path(os.environ["REPORT_PATH"])
+
+          msg = EmailMessage()
+          msg["Subject"] = f"Daily Diff Report - {repo}"
+          msg["From"] = sender
+          msg["To"] = recipient
+          msg["Date"] = formatdate(localtime=True)
+
+          body = textwrap.dedent(
+              f"""\
+              Hi there! 👋
+
+              Please find your daily diff report attached.
+
+              Repository: {repo}
+              Branch: {branch}
+              Period: Last {days_back} day(s)
+              Generated: {formatdate(localtime=True)}
+
+              You can also view this report in the GitHub Actions artifacts.
+
+              Best regards,
+              GitHub Actions Bot
+              """
+          ).strip()
+          msg.set_content(body)
+
+          if report_path.is_file():
+              ctype, _ = mimetypes.guess_type(report_path)
+              maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
+              msg.add_attachment(
+                  report_path.read_bytes(),
+                  maintype=maintype,
+                  subtype=subtype,
+                  filename=report_path.name,
+              )
+
+          client = boto3.client("ses")
+          response = client.send_raw_email(
+              Source=sender,
+              Destinations=[recipient],
+              RawMessage={"Data": msg.as_bytes()},
+          )
+          print("✅ Email sent via SES:", response["MessageId"])
+          PY
+
+      - name: Display report summary
+        run: |
+          report_file="${{ steps.diff.outputs.report_file }}"
+          commits_count="${{ steps.commits.outputs.commits_count }}"
+
+          echo "## Daily Diff Report Generated Successfully! 📊"
+          echo ""
+          echo "**Date:** $(date +%Y-%m-%d)"
+          echo "**Branch:** $TARGET_BRANCH"
+          echo "**Days Back:** $DAYS_BACK"
+          echo "**Recipient:** $RECIPIENT_EMAIL"
+          echo "**Commits Found:** $commits_count"
+          echo ""
+          echo "### Report Preview:"
+          head -30 "$report_file" || true
+          echo ""
+          echo "Full report has been:"
+          echo "- 📤 Uploaded as an artifact"
+          echo "- ✉️  Sent via email to $RECIPIENT_EMAIL"

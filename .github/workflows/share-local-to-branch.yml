@@ -1,0 +1,197 @@
+name: Share local working tree to branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to push to (omit to use per-user var or current local branch)"
+        required: false
+        default: ""
+      commit_message:
+        description: "Commit message for local changes (if any)"
+        required: true
+        default: "chore: share local work → branch"
+      working_dir:
+        description: "Mounted working copy path"
+        required: false
+        default: "/workspace"
+      repo_base:
+        description: "Fallback clone base dir if no mounted working_dir"
+        required: false
+        default: "/home/runner/_repos"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: share-local-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  share:
+    runs-on:
+      - self-hosted
+      - user-${{ github.actor }}
+
+    env:
+      COMMIT_MESSAGE: ${{ github.event.inputs.commit_message }}
+      REPO_BASE: ${{ github.event.inputs.repo_base }}
+      WORKING_DIR: ${{ github.event.inputs.working_dir }}
+      GIT_AUTHOR_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_AUTHOR_EMAIL: "actions@github.com"
+      GIT_COMMITTER_NAME: "GitHub Actions (Self-Hosted)"
+      GIT_COMMITTER_EMAIL: "actions@github.com"
+
+    steps:
+      - name: Resolve repo path (prefer mounted working copy)
+        id: ensure
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%/*}"
+          name="${GITHUB_REPOSITORY#*/}"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+
+          if [[ -n "$WORKING_DIR" && -d "$WORKING_DIR/.git" ]]; then
+            path="$WORKING_DIR"
+            echo "Using mounted working copy: $path"
+            actual="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+            if [[ -n "$actual" && "$actual" != "$url" ]]; then
+              echo "::error::Mounted repo remote ($actual) does not match calling repo ($url)."
+              exit 1
+            fi
+            if ! git -C "$path" remote | grep -qx origin; then
+              git -C "$path" remote add origin "$url"
+            else
+              git -C "$path" remote set-url origin "$url"
+            fi
+            git -C "$path" fetch origin --prune || true
+          else
+            base="${REPO_BASE}/${owner}"
+            mkdir -p "$base"
+            path="${base}/${name}"
+            echo "Mounted working copy not found; using persistent clone: $path"
+            if [[ ! -d "$path/.git" ]]; then
+              git clone "$url" "$path"
+            else
+              git -C "$path" remote set-url origin "$url"
+              git -C "$path" fetch origin --prune
+            fi
+          fi
+
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "url=$url"   >> "$GITHUB_OUTPUT"
+
+      - name: Configure auth (PUSH_PAT or GITHUB_TOKEN)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          AUTH_TOKEN="${{ secrets.PUSH_PAT }}"
+          if [[ -z "$AUTH_TOKEN" ]]; then AUTH_TOKEN="${{ github.token }}"; fi
+          enc="$(printf "x-access-token:%s" "$AUTH_TOKEN" | base64 -w 0 2>/dev/null || base64 -i -)"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $enc"
+
+      - name: Configure Git identity (respect existing, fallback to bot)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          name="$(git config --get user.name  || echo "github-actions[bot]")"
+          email="$(git config --get user.email || echo "41898282+github-actions[bot]@users.noreply.github.com")"
+          git config user.name  "$name"
+          git config user.email "$email"
+          echo "Using git identity: $name <$email>"
+
+      - name: Commit local changes (if any)
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "${COMMIT_MESSAGE}"
+            echo "did_commit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No local changes to commit."
+            echo "did_commit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- New: build the repo variable key from the actor login ---
+      - name: Compute normalized login for var key
+        id: who
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Lowercase the GitHub login and replace '-' with '_'
+          login_lc="${GITHUB_ACTOR,,}"
+          norm="${login_lc//-/_}"     # e.g., fizza-awais -> fizza_awais
+          echo "norm=$norm" >> "$GITHUB_OUTPUT"
+          echo "var_key=${norm}_branch" >> "$GITHUB_OUTPUT"
+          echo "Expecting repo variable: ${norm}_branch"
+
+      # --- Replaces original "Determine branch" step ---
+      - name: Determine branch (input > per-user repo var > current local branch)
+        id: target
+        shell: bash
+        env:
+          INPUT_BRANCH: ${{ github.event.inputs.branch }}
+          FROM_VARS:   ${{ vars[steps.who.outputs.var_key] }}
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+
+          if [[ -n "$INPUT_BRANCH" ]]; then
+            target="$INPUT_BRANCH"
+          elif [[ -n "$FROM_VARS" ]]; then
+            target="$FROM_VARS"
+          else
+            # Fallback to the current local branch or bail, preserving your original behavior
+            current="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+            if [[ "$current" != "HEAD" && -n "$current" ]]; then
+              target="$current"
+            else
+              echo "::error::No branch provided and no per-user variable set for $GITHUB_ACTOR (expected: ${{ steps.who.outputs.var_key }})."
+              exit 1
+            fi
+          fi
+
+          echo "Using branch: $target"
+          echo "target_branch=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Push HEAD to target branch
+        shell: bash
+        env:
+          TARGET: ${{ steps.target.outputs.target_branch }}
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          git fetch origin --prune || true
+          if git ls-remote --exit-code origin "refs/heads/$TARGET" >/dev/null 2>&1; then
+            git push origin HEAD:"refs/heads/$TARGET"
+          else
+            git push -u origin HEAD:"refs/heads/$TARGET"
+          fi
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          echo "✅ Final Status"
+          echo "Path: $(pwd)"
+          echo "Repo root: $(git rev-parse --show-toplevel)"
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "Remote: $(git remote get-url origin)"
+          git log -1 --oneline || true
+          git status --short || true
+
+      - name: Safety scrub (ensure no leftover headers in mounted repo)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.ensure.outputs.path }}"
+          # Remove any accidental writes to local config (shouldn't exist, but safe to do)
+          git config --unset-all http.https://github.com/.extraheader || true

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shared-lib"
+version = "0.1.0"
+description = "Shared library for common functionality and utilities"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+dependencies = [
+    "fastapi>=0.115.12",
+    "SQLAlchemy>=2.0.41",
+    "httpx>=0.28.1"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/shared"
+Repository = "https://github.com/yourusername/shared"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+packages = ["lib", "lib.discord"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"lib" = ["files/*"]

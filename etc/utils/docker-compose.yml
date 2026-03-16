@@ -1,0 +1,20 @@
+services:
+  github-runner:
+    image: youruser/gh-runner:latest
+    container_name: github-runner
+    platform: linux/arm64         # set to linux/amd64 on x86_64 hosts
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      # Or mount a token file (safer)
+      # - ./secrets/gh_pat:/run/secret/gh_pat:ro
+    environment:
+      REGISTRATION_MODE: repo     # or org
+      RUNNER_NAME: docker-runner
+      RUNNER_LABELS: self-hosted
+      # Required at runtime (via env-file or CLI):
+      # COMPANY_TOKEN: ""
+      # GITHUB_OWNER: ""
+      # GITHUB_REPO: ""      # required when REGISTRATION_MODE=repo
+      # COMPANY_TOKEN_FILE: /run/secret/gh_pat   # if using file-based secret
